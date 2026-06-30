@@ -10,6 +10,9 @@ This document defines the full technology stack for Tayf. Every decision here is
 |---|---|---|
 | Ingestion | Go | High-throughput OTLP-compatible signal ingestion |
 | Event Bus | NATS JetStream | Unified normalized event stream |
+| Caching + State | NATS Key/Value | Agent state, config, session cache (built into NATS) |
+| Agent Connectivity | NATS Leaf Nodes | Remote agent-to-control-plane tunneling (built into NATS) |
+| Auth | NATS NKeys + JWT | Agent and service authentication (built into NATS) |
 | Log Storage | ClickHouse | Columnar log storage and search |
 | Trace Storage | ClickHouse | Distributed trace storage and analysis |
 | Metrics Storage | VictoriaMetrics | High-performance time-series metrics |
@@ -39,7 +42,13 @@ The ingestion layer is the entry point for all telemetry signals into Tayf. It r
 
 ---
 
-### Event Bus — NATS JetStream
+### NATS — Single Binary, Multiple Roles
+
+NATS is not just the event bus. It is a single binary that covers multiple infrastructure needs in Tayf — replacing what would otherwise require several separate tools (Kafka, Redis, a custom auth layer, a VPN tunnel). Everything below comes from one NATS server with JetStream enabled.
+
+---
+
+#### NATS JetStream — Event Bus
 
 The event bus is the heart of Tayf. All signals from the ingestion layer flow into a single normalized event stream. Every other layer consumes from this stream.
 
@@ -47,10 +56,10 @@ The event bus is the heart of Tayf. All signals from the ingestion layer flow in
 - Fully open source — Apache 2.0, no BSL restrictions ✅
 - Extremely lightweight — single binary, ~20MB memory footprint
 - Very high throughput with low latency — built for cloud-native workloads
-- JetStream adds persistent, replayable streams on top of core NATS
+- Persistent, replayable streams — consumers can replay from any point in time
+- Multiple independent consumers read the same event simultaneously
 - Much simpler to operate than Kafka or Redpanda — zero external dependencies
 - Easy to run locally — ideal for OSS contributor experience
-- Covers both high-throughput event streaming AND lightweight message dispatch in one tool
 
 **Why not Kafka or Redpanda:**
 
@@ -62,6 +71,67 @@ The event bus is the heart of Tayf. All signals from the ingestion layer flow in
 | Memory footprint | Heavy (JVM) | Medium | Very light |
 | Local dev experience | Heavy | Good | Excellent |
 | Maturity | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
+
+---
+
+#### NATS Key/Value Store — Caching + State
+
+Built on top of JetStream — available automatically when JetStream is enabled. No extra setup, no extra binary.
+
+**What Tayf uses it for:**
+- Agent runtime state (running, stopped, last seen, health)
+- Live configuration (ingestion batch size, retention policies, feature flags)
+- User session tokens — fast lookup without hitting PostgreSQL on every request
+- Plugin registry — which plugins are available and their versions
+- Short-lived cache for expensive correlation engine results (with TTL)
+
+**Why not Redis:**
+- Already available inside NATS — zero additional dependency
+- Supports TTL, real-time key watching, and replication natively
+- One less binary to run locally, one less service to operate in production
+
+---
+
+#### NATS Leaf Nodes — Agent Connectivity
+
+Leaf Nodes allow remote NATS clients (Tayf agents running on customer infrastructure) to connect back to the central Tayf NATS cluster securely, as if they were local.
+
+**What this means for Tayf:**
+- Agents running on bare metal, VMs, or remote Kubernetes clusters connect back to Tayf control plane via Leaf Node
+- No VPN required — Leaf Nodes handle the secure bridging
+- Agents appear as local subjects to the NATS cluster
+- Enables bidirectional communication — control plane can push commands to agents, agents push telemetry back
+
+```
+Remote Agent (Rust)
+      │
+      │ NATS Leaf Node connection
+      ▼
+Tayf NATS Cluster (control plane)
+```
+
+---
+
+#### NATS NKeys + JWT — Authentication
+
+NATS has a built-in decentralized authentication and authorization system using NKeys (public/private key pairs) and JWTs.
+
+**What Tayf uses it for:**
+- Agent identity — each deployed agent gets an NKey pair, authenticating itself to the NATS cluster
+- Service-to-service auth — internal Tayf components authenticate to NATS via NKeys
+- Multi-tenancy — NATS accounts provide natural isolation between tenants
+- No external auth service needed for the messaging layer
+
+---
+
+#### What One NATS Binary Replaces
+
+| Need | Without NATS | With NATS |
+|---|---|---|
+| Event streaming | Kafka or Redpanda | ✅ JetStream |
+| Caching + state | Redis | ✅ Key/Value Store |
+| Agent tunneling | Custom gRPC tunnel or VPN | ✅ Leaf Nodes |
+| Messaging auth | Custom auth layer | ✅ NKeys + JWT |
 
 ---
 
@@ -290,6 +360,8 @@ Log + Trace Storage               Metrics Storage
 | Traces | ClickHouse | Same engine, cross-signal correlation |
 | Metrics | VictoriaMetrics | Time-series optimized, Prometheus-compatible |
 | Event stream | NATS JetStream | High-throughput, lightweight, Apache 2.0 |
+| Caching + state | NATS Key/Value | TTL, key watching, replication — built into NATS |
+| Agent state | NATS Key/Value | Runtime state, health, last seen |
 | Control plane data | PostgreSQL | Relational, reliable, battle-tested |
 
 ---
