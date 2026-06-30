@@ -9,7 +9,7 @@ This document defines the full technology stack for Tayf. Every decision here is
 | Layer | Technology | Role |
 |---|---|---|
 | Ingestion | Go | High-throughput OTLP-compatible signal ingestion |
-| Event Bus | Redpanda | Unified normalized event stream |
+| Event Bus | NATS JetStream | Unified normalized event stream |
 | Log Storage | ClickHouse | Columnar log storage and search |
 | Trace Storage | ClickHouse | Distributed trace storage and analysis |
 | Metrics Storage | VictoriaMetrics | High-performance time-series metrics |
@@ -18,6 +18,7 @@ This document defines the full technology stack for Tayf. Every decision here is
 | Correlation Engine | Go | Cross-signal correlation and query |
 | Agent Generator | Python | LLM-powered agent generation |
 | Control Plane API | Go | gRPC + protobuf API layer |
+| Real-time Push | Centrifugo | Live dashboard updates via WebSocket |
 | Dashboard | React | Visualization and control plane UI |
 | API Protocol | gRPC + protobuf | Internal and external API communication |
 | Local Dev | Docker Compose | Local development environment |
@@ -38,16 +39,29 @@ The ingestion layer is the entry point for all telemetry signals into Tayf. It r
 
 ---
 
-### Event Bus — Redpanda
+### Event Bus — NATS JetStream
 
 The event bus is the heart of Tayf. All signals from the ingestion layer flow into a single normalized event stream. Every other layer consumes from this stream.
 
-**Why Redpanda:**
-- Fully Kafka-compatible API — same clients, same ecosystem, no lock-in
-- Significantly faster than Kafka with no JVM overhead
-- Operationally simpler — single binary, no Zookeeper dependency
-- Lower resource usage makes it easier to self-host
-- Better fit for an OSS project where developers run it locally
+**Why NATS JetStream:**
+- Fully open source — Apache 2.0, no BSL restrictions ✅
+- Extremely lightweight — single binary, ~20MB memory footprint
+- Very high throughput with low latency — built for cloud-native workloads
+- JetStream adds persistent, replayable streams on top of core NATS
+- Much simpler to operate than Kafka or Redpanda — zero external dependencies
+- Easy to run locally — ideal for OSS contributor experience
+- Covers both high-throughput event streaming AND lightweight message dispatch in one tool
+
+**Why not Kafka or Redpanda:**
+
+| | Kafka | Redpanda | NATS JetStream |
+|---|---|---|---|
+| License | Apache 2.0 ✅ | BSL ⚠️ | Apache 2.0 ✅ |
+| Performance | Very high | Highest | Very high |
+| Ops complexity | High | Low | Very low |
+| Memory footprint | Heavy (JVM) | Medium | Very light |
+| Local dev experience | Heavy | Good | Excellent |
+| Maturity | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
 
 ---
 
@@ -183,6 +197,27 @@ The control plane API exposes all Tayf functionality to the CLI, dashboard, and 
 
 ---
 
+### Real-time Push — Centrifugo
+
+Centrifugo delivers live updates from the correlation engine to the dashboard in real time via WebSocket and SSE — so alerts, metric spikes, and agent status changes appear instantly without polling.
+
+**Why Centrifugo:**
+- MIT license — fully open source ✅
+- Single binary, very low ops overhead
+- Built specifically for real-time push to browser clients
+- Scales well — designed for high connection counts
+- Backend-agnostic — integrates cleanly with Go control plane via API
+- Supports WebSocket, SSE, and HTTP streaming out of the box
+
+**How it fits in the pipeline:**
+```
+Correlation Engine → Centrifugo → Dashboard (React via WebSocket)
+```
+
+It is the last mile delivery layer to the browser — separate from the main telemetry pipeline (NATS JetStream) which handles backend event streaming.
+
+---
+
 ### Dashboard — React
 
 The Tayf dashboard provides visualization, agent management, alert configuration, and control plane access via a web UI.
@@ -196,7 +231,7 @@ The Tayf dashboard provides visualization, agent management, alert configuration
 
 ### Local Development — Docker Compose
 
-All Tayf dependencies (Redpanda, ClickHouse, VictoriaMetrics, PostgreSQL) run locally via Docker Compose for a simple developer experience.
+All Tayf dependencies (NATS JetStream, ClickHouse, VictoriaMetrics, PostgreSQL) run locally via Docker Compose for a simple developer experience.
 
 ```bash
 # Start all dependencies
@@ -220,7 +255,7 @@ Client (app / infra / agent)
 Ingestion Layer (Go — OTLP compatible)
         │
         ▼
-Event Bus (Redpanda — unified event stream)
+Event Bus (NATS JetStream — unified event stream)
         │
         ├──────────────────────────────────┐
         ▼                                  ▼
@@ -231,12 +266,18 @@ Log + Trace Storage               Metrics Storage
                        ▼
           Query + Correlation Engine (Go)
                        │
-                       ▼
-          Dashboard + Control Plane (React + Go)
-                       │
-                       ▼
-              Agent Runtime (Rust)
-          distributed across infrastructure
+                       ├─────────────────────────┐
+                       ▼                         ▼
+          Dashboard + Control Plane        Centrifugo
+              (React + Go API)         (real-time push)
+                       │                         │
+                       └───────────┬─────────────┘
+                                   ▼
+                            Browser (React)
+                                   │
+                                   ▼
+                        Agent Runtime (Rust)
+                    distributed across infrastructure
 ```
 
 ---
@@ -248,7 +289,7 @@ Log + Trace Storage               Metrics Storage
 | Logs | ClickHouse | Columnar, fast search and aggregation |
 | Traces | ClickHouse | Same engine, cross-signal correlation |
 | Metrics | VictoriaMetrics | Time-series optimized, Prometheus-compatible |
-| Event stream | Redpanda | High-throughput, Kafka-compatible |
+| Event stream | NATS JetStream | High-throughput, lightweight, Apache 2.0 |
 | Control plane data | PostgreSQL | Relational, reliable, battle-tested |
 
 ---
@@ -263,7 +304,8 @@ Log + Trace Storage               Metrics Storage
 | PostgreSQL | 16+ |
 | ClickHouse | 24+ |
 | VictoriaMetrics | 1.100+ |
-| Redpanda | 24+ |
+| NATS JetStream | 2.10+ |
+| Centrifugo | 5+ |
 | React | 18+ |
 | protobuf | 3 |
 | Docker Compose | 2+ |
